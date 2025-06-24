@@ -5,106 +5,77 @@ Description: Multi-Cloud AI Service Pipeline
 Parameters:
   GitHubRepo:
     Type: String
-    Description: GitHub repository name (e.g., user/repo)
+    Default: vncharyhub/multi-cloud-ai-service-pipeline
   GitHubBranch:
     Type: String
     Default: master
-  GitHubToken:
+  GitHubSecretId:
     Type: String
-    NoEcho: true
-    Description: GitHub Personal Access Token (stored in Secrets Manager)
+    Default: Assessment_AWS
+  GitHubSecretKey:
+    Type: String
+    Default: Assessment_AWS
 
 Resources:
 
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: LambdaExecutionRole
+      RoleName: LambdaAIInvokeRole
       AssumeRolePolicyDocument:
-        Version: '2012-10-17'
+        Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: LambdaExecutionPolicy
+        - PolicyName: LambdaSecretsPolicy
           PolicyDocument:
-            Version: '2012-10-17'
+            Version: "2012-10-17"
             Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: "*"
               - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                  - secretsmanager:GetSecretValue
                 Resource: "*"
-
-  BedrockSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: bedrock-api-key
-      Description: API key for Amazon Bedrock
-      SecretString: '{"api_key": "dummy-bedrock-api-key"}'
-
-  AzureSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: azure-api-key
-      Description: API key for Azure OpenAI
-      SecretString: '{"api_key": "dummy-azure-api-key"}'
 
   LambdaFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: MultiCloudAIHandler
+      CodeUri: s3://genpactassessment/function.zip
       Handler: handler.lambda_handler
       Runtime: python3.11
-      CodeUri: lambda/
-      MemorySize: 256
-      Timeout: 30
       Role: !GetAtt LambdaExecutionRole.Arn
       Environment:
         Variables:
-          BEDROCK_SECRET_NAME: !Ref BedrockSecret
-          AZURE_SECRET_NAME: !Ref AzureSecret
+          SECRET_NAME: !Ref GitHubSecretId
+          GITHUB_TOKEN_KEY: !Ref GitHubSecretKey
+      Events:
+        ApiInvoke:
+          Type: HttpApi
+          Properties:
+            Path: /invoke
+            Method: POST
 
-  HttpApi:
+  ApiGateway:
     Type: AWS::Serverless::HttpApi
     Properties:
-      Name: MultiCloudAIHttpApi
+      Name: MultiCloudAIHttpAPI
 
-  LambdaApiIntegration:
-    Type: AWS::Serverless::Api
-    Properties:
-      StageName: prod
-      Name: MultiCloudAIAPI
-      DefinitionBody:
-        openapi: "3.0.1"
-        info:
-          title: "MultiCloudAI"
-          version: "1.0"
-        paths:
-          /invoke:
-            post:
-              x-amazon-apigateway-integration:
-                uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations
-                httpMethod: POST
-                type: aws_proxy
-              responses: {}
+  PipelineArtifactBucket:
+    Type: AWS::S3::Bucket
 
-  LambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !Ref LambdaFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*
-
-  CodePipelineRole:
+  PipelineExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: CodePipelineServiceRole
+      RoleName: CodePipelineExecRole
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -119,83 +90,52 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
-                  - codebuild:*
-                  - cloudformation:*
                   - s3:*
+                  - cloudformation:*
                   - iam:PassRole
-                Resource: "*"
+                  - lambda:*
+                  - apigateway:*
+                  - secretsmanager:GetSecretValue
+                Resource: '*'
 
-  PipelineArtifactBucket:
-    Type: AWS::S3::Bucket
-
-  CodeBuildProject:
-    Type: AWS::CodeBuild::Project
-    Properties:
-      Name: MultiCloudAIBuild
-      Source:
-        Type: CODEPIPELINE
-      Environment:
-        ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/standard:6.0
-        Type: LINUX_CONTAINER
-      ServiceRole: !GetAtt CodePipelineRole.Arn
-      Artifacts:
-        Type: CODEPIPELINE
-      TimeoutInMinutes: 5
-      BuildSpec: buildspec.yml
-
-  CodePipeline:
+  Pipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
-      Name: MultiCloudAIPipeline
-      RoleArn: !GetAtt CodePipelineRole.Arn
+      RoleArn: !GetAtt PipelineExecutionRole.Arn
       ArtifactStore:
         Type: S3
         Location: !Ref PipelineArtifactBucket
       Stages:
         - Name: Source
           Actions:
-            - Name: SourceAction
+            - Name: GitHubSource
               ActionTypeId:
                 Category: Source
                 Owner: ThirdParty
                 Provider: GitHub
-                Version: '1'
+                Version: 1
               OutputArtifacts:
-                - Name: SourceOutput
+                - Name: SourceArtifact
               Configuration:
                 Owner: !Select [0, !Split ["/", !Ref GitHubRepo]]
                 Repo: !Select [1, !Split ["/", !Ref GitHubRepo]]
                 Branch: !Ref GitHubBranch
-                OAuthToken: !Ref GitHubToken
+                OAuthToken: !Sub '{{resolve:secretsmanager:${GitHubSecretId}:SecretString:${GitHubSecretKey}}}'
               RunOrder: 1
-        - Name: Build
-          Actions:
-            - Name: BuildAction
-              ActionTypeId:
-                Category: Build
-                Owner: AWS
-                Provider: CodeBuild
-                Version: '1'
-              InputArtifacts:
-                - Name: SourceOutput
-              OutputArtifacts:
-                - Name: BuildOutput
-              Configuration:
-                ProjectName: !Ref CodeBuildProject
-              RunOrder: 1
+
         - Name: Deploy
           Actions:
-            - Name: DeployAction
+            - Name: DeployStack
               ActionTypeId:
                 Category: Deploy
                 Owner: AWS
                 Provider: CloudFormation
-                Version: '1'
+                Version: 1
               InputArtifacts:
-                - Name: BuildOutput
+                - Name: SourceArtifact
               Configuration:
                 ActionMode: CREATE_UPDATE
                 StackName: MultiCloudAIStack
-                TemplatePath: BuildOutput::template.yaml
+                TemplatePath: SourceArtifact::template.yaml
+                Capabilities: CAPABILITY_NAMED_IAM
               RunOrder: 1

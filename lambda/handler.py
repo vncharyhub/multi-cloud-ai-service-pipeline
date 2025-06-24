@@ -1,58 +1,56 @@
 import json
-import boto3
 import os
+import boto3
+import logging
+import urllib3
 
-secrets_client = boto3.client('secretsmanager')
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
-def get_secret(secret_name):
-    response = secrets_client.get_secret_value(SecretId=secret_name)
-    return json.loads(response['SecretString'])
+secrets_client = boto3.client("secretsmanager")
+http = urllib3.PoolManager()
 
-def invoke_bedrock(prompt):
-    # Placeholder for Amazon Bedrock logic
-    # In reality, use boto3 client for bedrock-runtime
-    return {
-        "model": "bedrock",
-        "response": f"Bedrock response to '{prompt}'"
-    }
+# Fetch secrets once outside the handler for better performance
+SECRET_NAME = os.environ.get("SECRET_NAME", "Assessment_AWS")
+GITHUB_TOKEN_KEY = os.environ.get("GITHUB_TOKEN_KEY", "token")
 
-def invoke_azure(prompt, api_key):
-    # Placeholder for Azure OpenAI call
-    return {
-        "model": "azure",
-        "response": f"Azure response to '{prompt}' with API key {api_key[:5]}..."
-    }
+cached_secrets = None
+def get_secret():
+    global cached_secrets
+    if cached_secrets is None:
+        response = secrets_client.get_secret_value(SecretId=SECRET_NAME)
+        cached_secrets = json.loads(response["SecretString"])
+    return cached_secrets
+
+def call_bedrock(prompt):
+    # response to simulate Bedrock
+    return {"response": f"Bedrock response to: {prompt}"}
+
+def call_azure_openai(prompt):
+    # Placeholder for Azure OpenAI integration
+    return {"response": f"Azure OpenAI response to: {prompt}"}
 
 def lambda_handler(event, context):
     try:
-        body = json.loads(event['body'])
+        body = json.loads(event["body"])
         prompt = body.get("prompt")
         target_model = body.get("target_model")
 
         if not prompt or not target_model:
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "prompt and target_model required"})
-            }
+            return {"statusCode": 400, "body": json.dumps({"error": "Missing prompt or target_model"})}
 
         if target_model == "bedrock":
-            response = invoke_bedrock(prompt)
+            result = call_bedrock(prompt)
         elif target_model == "azure":
-            secret = get_secret(os.environ['AZURE_SECRET_NAME'])
-            response = invoke_azure(prompt, secret['api_key'])
+            result = call_azure_openai(prompt)
         else:
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "Unsupported model"})
-            }
+            return {"statusCode": 400, "body": json.dumps({"error": "Invalid target_model"})}
 
         return {
             "statusCode": 200,
-            "body": json.dumps(response)
+            "body": json.dumps(result)
         }
 
     except Exception as e:
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
-        }
+        logger.exception("Error handling request")
+        return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
